@@ -9,6 +9,7 @@ import codecs
 import csv
 import itertools
 import os
+import random
 import re
 import unicodedata
 from io import open
@@ -310,6 +311,135 @@ class Attn(nn.Module):
 
         attn_energies = attn_energies.t()
         return F.softmax(attn_energies, dim=1).unsqueeze(1)
+
+
+class LuongAttenDecoderRNN(nn.Module):
+    def __init__(self, attn_model, embedding, hidden_size, output_size, n_layers=1, dropout=0.1):
+        super(LuongAttenDecoderRNN, self).__init__()
+        self.attn_model = attn_model
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.dropout = dropout
+
+        # Define layers
+        self.embedding = embedding
+        self.embedding_dropout = nn.Dropout(dropout)
+        self.gru = nn.GRU(hidden_size, hidden_size, n_layers,
+                          dropout=(0 if n_layers == 1 else dropout))
+        self.concat = nn.Linear(hidden_size * 2, hidden_size)
+        self.out = nn.Linear(hidden_size, output_size)
+        self.attn = Attn(attn_model, hidden_size)
+
+    def forward(self, input_step, last_hidden, encoder_outputs):
+        # Note: we run this one step at a time
+        embedded = self.embedding(input_step)
+        embedded = self.embedding_dropout(embedded)
+        # Forward through bidirectional GRU
+        rnn_output, hidden = self.gru(embedded, last_hidden)
+        # Calculate attention weights from the GRU outputs
+        attn_weights = self.attn(rnn_output, encoder_outputs)
+        # Multiply calculated attention weights to encoder outputs to get new weighted sum context vector
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1))
+        # Concatenate weighted context vector and GRU output using Luong eq.5
+        rnn_output = rnn_output.squeeze(0)
+        context = context.squeeze(1)
+        concat_input = torch.cat((rnn_output, context), 1)
+        concat_output = torch.tanh(self.concat(concat_input))
+        # Predict next word using Luong eq.6
+        output = self.out(concat_output)
+        output = F.softmax(output, dim=1)
+        # Return output and final hidden state
+        return output, hidden
+
+
+# Define Training Procedure
+# Masked Loss
+def mask_NLLLoss(inp, target, mask):
+    n_total = mask.sum()
+    cross_entropy = -torch.log(torch.gather(inp, 1, target.view(-1, 1)).squeeze(1))
+    loss = cross_entropy.masked_select(mask).mean()
+    loss = loss.to(device)
+    return loss, n_total.item()
+
+
+# Single training iteration
+def train(input_variable, lengths, target_variable, mask, max_target_len,
+          encoder, decoder, embedding, encoder_optimizer, decoder_optimizer,
+          teacher_forcing_ratio, batch_size, clip, max_length=MAX_LENGTH):
+    # Zero gradients
+    encoder_optimizer.zero_gradients()
+    decoder_optimizer.zero_gradients()
+
+    # Set device options
+    input_variable = input_variable.to(device)
+    lengths = lengths.to(device)
+    target_variable = target_variable.to(device)
+    mask = mask.to(device)
+
+    # Initialize variables
+    loss = 0
+    print_losses = []
+    n_totals = 0
+
+    # Forward pass entire input batch through encoder
+    encoder_outputs, encoder_hidden = encoder(input_variable, lengths)
+
+    # Initialize decoder input as SOS_token
+    decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size)]])
+    decoder_input = decoder_input.to(device)
+
+    # Set decoder initial hidden state to encoder's final hidden state
+    decoder_hidden = encoder_hidden[:decoder.n_layers]
+
+    # Determine if we use teacher forcing this iteration
+    use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
+
+    # Forward batch of sequence through decoder one time step at a time
+    if use_teacher_forcing:
+        for t in range(max_target_len):
+            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            # Teacher forcing: next input is current target
+            decoder_input = target_variable[t].view(1, -1)
+            # Calculate and accumulate loss
+            mask_loss, n_total = mask_NLLLoss(decoder_output, target_variable[t], mask[t])
+            loss += mask_loss
+            print_losses.append(mask_loss.item() * n_total)
+            n_totals += n_total
+    else:
+        for t in range(max_target_len):
+            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            # No teacher forcing: next input is decoder's own current output word
+            _, topi = decoder_output.topk(1)
+            decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size)]])
+            decoder_input = decoder_input.to(device)
+            # Calculate and accumulate loss
+            mask_loss, n_total = mask_NLLLoss(decoder_output, target_variable[t], mask[t])
+            loss += mask_loss
+            print_losses.append(mask_loss.item() * n_total)
+            n_totals += n_total
+
+    # Perform backpropagation
+    loss.backward()
+
+    # Clip gradients: gradients are modified in place
+    _ = torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip)
+    _ = torch.nn.utils.clip_grad_norm_(decoder.parameters(), clip)
+
+    # Adjust model weights
+    encoder_optimizer.step()
+    decoder_optimizer.step()
+
+    return sum(print_losses) / n_totals
+
+
+# Training iterations
+def train_iters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer,
+                embedding, encoder_n_layers, decoder_n_layers, save_dir, n_iteration, batch_size,
+                print_every, save_every, clip, corpus_name, load_file_name):
+    # Load batches for each iteration
+    training_batches = [batch2train_data(voc, [random.choice(pairs) for _ in range(batch_size)])
+                        for _ in range(n_iteration)]
 
 
 if __name__ == '__main__':
