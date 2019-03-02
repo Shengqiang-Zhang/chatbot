@@ -499,7 +499,7 @@ class GreedySearchDecoder(nn.Module):
         # Prepare final encoder final state to be the first input hidden state of decoder
         decoder_hidden = encoder_hidden[:self.decoder.n_layers]
         # Initialize decoder first input as SOS_token
-        decoder_input = torch.ones(1, 1, device=device, dtype=torch.LongTensor) * SOS_token
+        decoder_input = torch.ones(1, 1, device=device, dtype=torch.long) * SOS_token
         # Initialize tensors to append decoded words to
         all_tokens = torch.zeros([0], device=device, dtype=torch.long)
         all_scores = torch.zeros([0], device=device)
@@ -656,3 +656,12 @@ if __name__ == '__main__':
     train_iters(model_name, voc, pairs, encoder, decoder, encoder_optimizer, decoder_optimizer,
                 embedding, encoder_n_layers, decoder_n_layers, teacher_force_ratio, save_dir, n_iteration,
                 batch_size, print_every, save_every, clip, corpus_name, load_file_name)
+
+    # ----------------------Run Evaluation--------------------------
+    # Set dropout layers to eval model
+    encoder.eval()
+    decoder.eval()
+    # Initialize searcher module
+    searcher = GreedySearchDecoder(encoder, decoder)
+    # Begin chatting
+    evaluate_input(encoder, decoder, searcher, voc)
