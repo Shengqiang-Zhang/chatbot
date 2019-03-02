@@ -1,0 +1,1 @@
+This chatbot is built based on the `PyTorch` official chatbot tutorial. It's a multi-domain generative conversational chatbot and it's trained using scripts from the `Cornell Movie-Dialogs Corpus`.
